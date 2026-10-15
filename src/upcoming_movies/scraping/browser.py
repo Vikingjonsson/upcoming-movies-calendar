@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import functools
+import os
+import shutil
 from collections.abc import Generator
 from contextlib import contextmanager
 
@@ -16,6 +19,19 @@ BROWSER_USER_AGENT: str = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+
+
+@functools.lru_cache(maxsize=1)
+def get_chromedriver_path() -> str:
+    """Resolve and cache chromedriver path, checking system PATH first."""
+    which_driver = shutil.which("chromedriver")
+    if (
+        which_driver
+        and os.path.isfile(which_driver)
+        and os.access(which_driver, os.X_OK)
+    ):
+        return which_driver
+    return ChromeDriverManager().install()
 
 
 def build_chrome_options() -> Options:
@@ -39,7 +55,7 @@ def build_chrome_options() -> Options:
 def create_headless_chrome_driver() -> Generator[webdriver.Chrome, None, None]:
     chrome_driver = None
     try:
-        chrome_service = ChromeService(ChromeDriverManager().install())
+        chrome_service = ChromeService(get_chromedriver_path())
         chrome_driver = webdriver.Chrome(
             service=chrome_service, options=build_chrome_options()
         )
