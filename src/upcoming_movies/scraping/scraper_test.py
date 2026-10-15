@@ -110,3 +110,49 @@ class TestScrapeViaNextData:
         mock_driver = MagicMock()
         mock_driver.execute_async_script.side_effect = WebDriverException("Timeout")
         assert _scrape_via_next_data(mock_driver) is None
+
+    def test_passes_date_filters_to_execute_async_script(self) -> None:
+        mock_driver = MagicMock()
+        mock_driver.execute_async_script.return_value = {"movies": []}
+        from upcoming_movies.scraping.scraper import _scrape_via_next_data
+
+        _scrape_via_next_data(
+            mock_driver,
+            start_date=date(2026, 10, 16),
+            end_date=date(2026, 10, 18),
+        )
+
+        assert mock_driver.execute_async_script.called
+        call_args = mock_driver.execute_async_script.call_args[0]
+        assert call_args[1] == "2026-10-16"
+        assert call_args[2] == "2026-10-18"
+
+
+class TestScrapeAllMovieDetailsDateFiltering:
+    def test_filters_by_date_range(self) -> None:
+        mock_driver = MagicMock()
+        movies = [
+            ScheduledMovie("Movie 1", "Oct 1, 2026", "https://imdb.com/title/tt1"),
+            ScheduledMovie("Movie 2", "Oct 16, 2026", "https://imdb.com/title/tt2"),
+            ScheduledMovie("Movie 3", "Nov 5, 2026", "https://imdb.com/title/tt3"),
+        ]
+
+        with patch(
+            "upcoming_movies.scraping.scraper.scrape_movie_detail_page"
+        ) as mock_scrape:
+            mock_scrape.return_value = MovieCalendarEvent(
+                title="Movie 2",
+                release_date=date(2026, 10, 16),
+                imdb_url="https://imdb.com/title/tt2",
+                plot_description="Filtered movie",
+            )
+            events = _scrape_all_movie_details(
+                mock_driver,
+                movies,
+                start_date=date(2026, 10, 10),
+                end_date=date(2026, 10, 20),
+            )
+
+            assert len(events) == 1
+            assert events[0].title == "Movie 2"
+            assert mock_scrape.call_count == 1

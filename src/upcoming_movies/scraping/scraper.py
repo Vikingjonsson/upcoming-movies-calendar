@@ -21,6 +21,7 @@ from upcoming_movies.scraping.scraper_utils import (
 logger = logging.getLogger(__name__)
 
 ELEMENT_WAIT_TIMEOUT_SECONDS: float = DEFAULT_CONFIG["timeout"]
+POLL_FREQUENCY_SECONDS: float = 0.1
 
 CALENDAR_SECTION_SELECTOR = '[data-testid="calendar-section"]'
 MOVIE_ENTRY_SELECTOR = '[data-testid="coming-soon-entry"]'
@@ -57,7 +58,9 @@ def parse_scheduled_movie_records(
 def collect_movie_links_from_calendar_page(
     driver: webdriver.Chrome,
 ) -> list[ScheduledMovie]:
-    element_wait = WebDriverWait(driver, ELEMENT_WAIT_TIMEOUT_SECONDS)
+    element_wait = WebDriverWait(
+        driver, ELEMENT_WAIT_TIMEOUT_SECONDS, poll_frequency=POLL_FREQUENCY_SECONDS
+    )
     element_wait.until(
         EC.presence_of_all_elements_located(
             (By.CSS_SELECTOR, CALENDAR_SECTION_SELECTOR)
@@ -125,7 +128,11 @@ def scrape_movie_detail_page(
         driver.get(movie.imdb_url)
 
         try:
-            element_wait = WebDriverWait(driver, ELEMENT_WAIT_TIMEOUT_SECONDS)
+            element_wait = WebDriverWait(
+                driver,
+                ELEMENT_WAIT_TIMEOUT_SECONDS,
+                poll_frequency=POLL_FREQUENCY_SECONDS,
+            )
             element_wait.until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, PLOT_SELECTOR))
             )
@@ -178,7 +185,11 @@ def scrape_movie_detail_page(
 
 
 def _scrape_all_movie_details(
-    chrome_driver: webdriver.Chrome, movie_links: list[ScheduledMovie]
+    chrome_driver: webdriver.Chrome,
+    movie_links: list[ScheduledMovie],
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
 ) -> list[MovieCalendarEvent]:
     scraped_movie_events: list[MovieCalendarEvent] = []
     movie_cache: dict[str, tuple[str, str | None, list[str]]] = {}
@@ -194,6 +205,11 @@ def _scrape_all_movie_details(
                 scheduled_movie.release_date_text,
                 scheduled_movie.title,
             )
+            continue
+
+        if start_date and parsed_date < start_date:
+            continue
+        if end_date and parsed_date > end_date:
             continue
 
         base_url = scheduled_movie.imdb_url.split("?")[0]
@@ -247,15 +263,24 @@ class NextDataMoviePayload(TypedDict, total=False):
 
 def _scrape_via_next_data(
     driver: webdriver.Chrome,
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
 ) -> list[MovieCalendarEvent] | None:
     """Fast-path scraper using IMDB's __NEXT_DATA__ and parallel plot fetching.
 
     Extracts upcoming movies with posters, genres, and exact dates in 1 page load,
-    and batches plot queries in parallel inside the browser.
+    and batches plot queries in parallel inside the browser for target releases.
     Returns None if __NEXT_DATA__ is unavailable.
     """
     js_script = """
     const callback = arguments[arguments.length - 1];
+    const startDateStr = arguments[0];
+    const endDateStr = arguments[1];
+
+    const startDate = startDateStr ? new Date(startDateStr + "T00:00:00Z") : null;
+    const endDate = endDateStr ? new Date(endDateStr + "T23:59:59Z") : null;
+
     let nextData = null;
     try {
         const el = document.getElementById("__NEXT_DATA__");
@@ -294,8 +319,23 @@ def _scrape_via_next_data(
         return;
     }
 
-    // Parallel fetch plots for upcoming releases (up to first 50)
-    const toFetch = movies.slice(0, 50);
+    // Determine target releases to fetch plots for:
+    // If date filters provided, fetch only for matching releases.
+    // Otherwise, fetch for up to 50 movies.
+    let toFetch = [];
+    if (startDate || endDate) {
+        toFetch = movies.filter(m => {
+            if (!m.release_date_str) return false;
+            const d = new Date(m.release_date_str);
+            if (isNaN(d.getTime())) return false;
+            if (startDate && d < startDate) return false;
+            if (endDate && d > endDate) return false;
+            return true;
+        });
+    } else {
+        toFetch = movies.slice(0, 50);
+    }
+
     async function fetchPlots() {
         const results = {};
         const chunkSize = 25;
@@ -303,16 +343,29 @@ def _scrape_via_next_data(
             const chunk = toFetch.slice(i, i + chunkSize);
             const chunkRes = await Promise.all(chunk.map(async m => {
                 const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), 3500);
+                const timer = setTimeout(() => controller.abort(), 2500);
                 try {
                     const r = await fetch(
                         "/title/" + m.id + "/", { signal: controller.signal }
                     );
                     clearTimeout(timer);
                     const html = await r.text();
-                    const doc = new DOMParser().parseFromString(html, "text/html");
-                    const el = doc.querySelector("[data-testid='plot-xl']");
-                    return { id: m.id, plot: el ? el.innerText.trim() : null };
+                    // Fast regex parse from title __NEXT_DATA__ before DOMParser
+                    const plotRegex =
+                        /"plotText":\\s*\\{\\s*"plainText":\\s*"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"/;
+                    const mPlot = html.match(plotRegex);
+                    let plot = null;
+                    if (mPlot) {
+                        try {
+                            plot = JSON.parse('"' + mPlot[1] + '"');
+                        } catch (_) {}
+                    }
+                    if (!plot) {
+                        const doc = new DOMParser().parseFromString(html, "text/html");
+                        const el = doc.querySelector("[data-testid='plot-xl']");
+                        plot = el ? el.innerText.trim() : null;
+                    }
+                    return { id: m.id, plot: plot };
                 } catch (e) {
                     clearTimeout(timer);
                     return { id: m.id, plot: null };
@@ -335,10 +388,13 @@ def _scrape_via_next_data(
     });
     """
 
+    start_iso = start_date.isoformat() if start_date else None
+    end_iso = end_date.isoformat() if end_date else None
+
     try:
         raw_result = cast(
             "dict[str, Any] | None",
-            driver.execute_async_script(js_script),
+            driver.execute_async_script(js_script, start_iso, end_iso),
         )
     except WebDriverException as exc:
         logger.debug("execute_async_script failed for NEXT_DATA: %s", exc)
@@ -386,7 +442,12 @@ IMDB_CALENDAR_URL_TEMPLATE = (
 )
 
 
-def scrape_upcoming_movies_from_imdb(region: str) -> list[MovieCalendarEvent]:
+def scrape_upcoming_movies_from_imdb(
+    region: str,
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> list[MovieCalendarEvent]:
     calendar_url = IMDB_CALENDAR_URL_TEMPLATE.format(region=region)
     logger.info("Scraping upcoming movies for region: %s", region)
 
@@ -397,7 +458,11 @@ def scrape_upcoming_movies_from_imdb(region: str) -> list[MovieCalendarEvent]:
             logger.debug("Loaded IMDB calendar page for region %s", region)
 
             # Wait until either __NEXT_DATA__ or calendar-section is present
-            element_wait = WebDriverWait(chrome_driver, ELEMENT_WAIT_TIMEOUT_SECONDS)
+            element_wait = WebDriverWait(
+                chrome_driver,
+                ELEMENT_WAIT_TIMEOUT_SECONDS,
+                poll_frequency=POLL_FREQUENCY_SECONDS,
+            )
             script_check = (
                 "return !!document.getElementById('__NEXT_DATA__') || "
                 "document.querySelectorAll("
@@ -406,7 +471,9 @@ def scrape_upcoming_movies_from_imdb(region: str) -> list[MovieCalendarEvent]:
             element_wait.until(lambda d: d.execute_script(script_check))
 
             # 1. Try fast-path via embedded NEXT_DATA
-            fast_events = _scrape_via_next_data(chrome_driver)
+            fast_events = _scrape_via_next_data(
+                chrome_driver, start_date=start_date, end_date=end_date
+            )
             if fast_events:
                 logger.info(
                     "Successfully scraped %d movies via fast-path", len(fast_events)
@@ -416,7 +483,12 @@ def scrape_upcoming_movies_from_imdb(region: str) -> list[MovieCalendarEvent]:
             # 2. Fallback to DOM-based extraction
             logger.info("NEXT_DATA not available; falling back to DOM extraction")
             movie_links = collect_movie_links_from_calendar_page(chrome_driver)
-            scraped_movie_events = _scrape_all_movie_details(chrome_driver, movie_links)
+            scraped_movie_events = _scrape_all_movie_details(
+                chrome_driver,
+                movie_links,
+                start_date=start_date,
+                end_date=end_date,
+            )
 
             logger.info(
                 "Successfully scraped %d movies via fallback", len(scraped_movie_events)

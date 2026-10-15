@@ -22,6 +22,7 @@ from upcoming_movies.exporters import (
     normalize_format,
     prompt_output_format,
     resolve_output_filename,
+    resolve_weekend_range,
 )
 from upcoming_movies.exporters.ics_exporter import DEFAULT_CALENDAR_NAME
 from upcoming_movies.models import MovieCalendarEvent
@@ -401,9 +402,16 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
         if not arguments.quiet:
             print(f"Scraping upcoming movies from IMDB for {region_name} ({region})...")
 
+        target_start = parsed_from
+        target_end = parsed_to
+        if is_weekend:
+            target_start, target_end = resolve_weekend_range()
+
         logger.info("Starting movie scraping process for region: %s", region)
         try:
-            movie_events = scrape_upcoming_movies_from_imdb(region)
+            movie_events = scrape_upcoming_movies_from_imdb(
+                region, start_date=target_start, end_date=target_end
+            )
         except Exception as exc:
             logger.debug("Scraping failed with exception", exc_info=True)
             print(f"Error scraping movies: {exc}", file=sys.stderr)
