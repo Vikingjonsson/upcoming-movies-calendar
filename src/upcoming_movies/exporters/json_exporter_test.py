@@ -12,6 +12,7 @@ from upcoming_movies.exporters.json_exporter import (
     filter_movies_by_date,
     get_weekend_movies,
     load_json_from_file,
+    resolve_weekend_range,
     save_json_to_file,
     serialize_movie_event,
 )
@@ -232,3 +233,17 @@ class TestGetWeekendMovies:
         ]
         weekend_movies = get_weekend_movies(events, reference_date=friday)
         assert [m.title for m in weekend_movies] == ["Friday", "Sunday"]
+
+
+class TestResolveWeekendRange:
+    def test_resolve_from_wednesday(self) -> None:
+        wednesday = date(2026, 4, 15)
+        fri, sun = resolve_weekend_range(wednesday)
+        assert fri == date(2026, 4, 17)
+        assert sun == date(2026, 4, 19)
+
+    def test_resolve_from_sunday(self) -> None:
+        sunday = date(2026, 4, 19)
+        fri, sun = resolve_weekend_range(sunday)
+        assert fri == date(2026, 4, 17)
+        assert sun == date(2026, 4, 19)

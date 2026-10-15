@@ -106,11 +106,10 @@ def filter_movies_by_date(
     return filtered
 
 
-def get_weekend_movies(
-    movie_events: list[MovieCalendarEvent],
+def resolve_weekend_range(
     reference_date: date | None = None,
-) -> list[MovieCalendarEvent]:
-    """Get movies releasing on or around the upcoming weekend (Friday through Sunday).
+) -> tuple[date, date]:
+    """Calculate the upcoming Friday through Sunday date range.
 
     If reference_date is a Monday-Thursday, returns the coming Friday-Sunday.
     If reference_date is Friday, Saturday, or Sunday, returns this Friday-Sunday.
@@ -127,5 +126,13 @@ def get_weekend_movies(
 
     friday = ref + timedelta(days=days_to_friday)
     sunday = friday + timedelta(days=2)
+    return friday, sunday
 
+
+def get_weekend_movies(
+    movie_events: list[MovieCalendarEvent],
+    reference_date: date | None = None,
+) -> list[MovieCalendarEvent]:
+    """Get movies releasing on or around the upcoming weekend."""
+    friday, sunday = resolve_weekend_range(reference_date)
     return filter_movies_by_date(movie_events, start_date=friday, end_date=sunday)

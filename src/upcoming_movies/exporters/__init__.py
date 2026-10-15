@@ -40,6 +40,9 @@ from upcoming_movies.exporters.json_exporter import (
     load_json_from_file as load_json_from_file,
 )
 from upcoming_movies.exporters.json_exporter import (
+    resolve_weekend_range as resolve_weekend_range,
+)
+from upcoming_movies.exporters.json_exporter import (
     save_json_to_file as save_json_to_file,
 )
 from upcoming_movies.models import MovieCalendarEvent
